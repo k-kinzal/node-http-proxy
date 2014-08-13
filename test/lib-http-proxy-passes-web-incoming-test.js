@@ -1,7 +1,8 @@
 var webPasses = require('../lib/http-proxy/passes/web-incoming'),
     httpProxy = require('../lib/http-proxy'),
     expect    = require('expect.js'),
-    http      = require('http');
+    http      = require('http'),
+    zlib      = require('zlib');
 
 describe('lib/http-proxy/passes/web.js', function() {
   describe('#deleteLength', function() {
@@ -10,7 +11,7 @@ describe('lib/http-proxy/passes/web.js', function() {
         method: 'DELETE',
         headers: {}
       };
-      webPasses.deleteLength(stubRequest, {}, {});
+      webPasses.deleteLength(stubRequest, {}, {});
       expect(stubRequest.headers['content-length']).to.eql('0');
     })
   });
@@ -74,34 +75,6 @@ describe('#createProxyServer.web() using own http server', function () {
     http.request('http://127.0.0.1:8081', function() {}).end();
   });
 
-  it('should detect a proxyReq event and modify headers', function (done) {
-    var proxy = httpProxy.createProxyServer({
-      target: 'http://127.0.0.1:8080',
-    });
-
-    proxy.on('proxyReq', function(proxyReq, req, res, options) {
-      proxyReq.setHeader('X-Special-Proxy-Header', 'foobar');
-    });
-
-    function requestHandler(req, res) {
-      proxy.web(req, res);
-    }
-
-    var proxyServer = http.createServer(requestHandler);
-
-    var source = http.createServer(function(req, res) {
-      source.close();
-      proxyServer.close();
-      expect(req.headers['x-special-proxy-header']).to.eql('foobar');
-      done();
-    });
-
-    proxyServer.listen('8081');
-    source.listen('8080');
-
-    http.request('http://127.0.0.1:8081', function() {}).end();
-  });
-
   it('should proxy the request and handle error via callback', function(done) {
     var proxy = httpProxy.createProxyServer({
       target: 'http://127.0.0.1:8080'
@@ -156,112 +129,43 @@ describe('#createProxyServer.web() using own http server', function () {
     }, function() {}).end();
   });
 
-  it('should proxy the request and handle timeout error (proxyTimeout)', function(done) {
-    var proxy = httpProxy.createProxyServer({
-      target: 'http://127.0.0.1:45000',
-      proxyTimeout: 100
-    });
-
-    require('net').createServer().listen(45000);
-
-    var proxyServer = http.createServer(requestHandler);
-
-    var started = new Date().getTime();
-    function requestHandler(req, res) {
-      proxy.once('error', function (err, errReq, errRes) {
-        proxyServer.close();
-        expect(err).to.be.an(Error);
-        expect(errReq).to.be.equal(req);
-        expect(errRes).to.be.equal(res);
-        expect(new Date().getTime() - started).to.be.greaterThan(99);
-        expect(err.code).to.be('ECONNRESET');
-        done();
-      });
-
-      proxy.web(req, res);
-    }
-
-    proxyServer.listen('8084');
-
-    http.request({
-      hostname: '127.0.0.1',
-      port: '8084',
-      method: 'GET',
-    }, function() {}).end();
-  });
-
-  it('should proxy the request and handle timeout error', function(done) {
-    var proxy = httpProxy.createProxyServer({
-      target: 'http://127.0.0.1:45001',
-      timeout: 100
-    });
-
-    require('net').createServer().listen(45001);
-
-    var proxyServer = http.createServer(requestHandler);
-
-    var cnt = 0;
-    var doneOne = function() {
-      cnt += 1;
-      if(cnt === 2) done();
-    }
-
-    var started = new Date().getTime();
-    function requestHandler(req, res) {
-      proxy.once('error', function (err, errReq, errRes) {
-        proxyServer.close();
-        expect(err).to.be.an(Error);
-        expect(errReq).to.be.equal(req);
-        expect(errRes).to.be.equal(res);
-        expect(err.code).to.be('ECONNRESET');
-        doneOne();
-      });
-
-      proxy.web(req, res);
-    }
-
-    proxyServer.listen('8085');
-
-    var req = http.request({
-      hostname: '127.0.0.1',
-      port: '8085',
-      method: 'GET',
-    }, function() {});
-
-    req.on('error', function(err) {
-      expect(err).to.be.an(Error);
-      expect(err.code).to.be('ECONNRESET');
-      expect(new Date().getTime() - started).to.be.greaterThan(99);
-      doneOne();
-    });
-    req.end();
-  });
-
-  it('should proxy the request and provide a proxyRes event with the request and response parameters', function(done) {
+ it('a proxy request to a backend returning gzip content will succeed', function(done) {
+    
     var proxy = httpProxy.createProxyServer({
       target: 'http://127.0.0.1:8080'
     });
 
     function requestHandler(req, res) {
-      proxy.once('proxyRes', function (proxyRes, pReq, pRes) {
-        source.close();
-        proxyServer.close();
-        expect(pReq).to.be.equal(req);
-        expect(pRes).to.be.equal(res);
-        done();
-      });
-
       proxy.web(req, res);
     }
 
     var proxyServer = http.createServer(requestHandler);
 
     var source = http.createServer(function(req, res) {
-      res.end('Response');
+
+      res.writeHead(200, {'Content-Type': 'text/html', 'Content-Encoding': 'gzip'});
+      var text = "GZIP Content";
+      var buf = new Buffer(text, 'utf-8');   // Choose encoding for the string.
+      zlib.gzip(buf, function (_, result) {  // The callback will give you the 
+        res.end(result);                     // result, so just send it.
+      });
+
     });
 
-    proxyServer.listen('8086');
+    proxyServer.listen('8081');
     source.listen('8080');
-    http.request('http://127.0.0.1:8086', function() {}).end();
+
+    http.request('http://127.0.0.1:8081', function(res) {
+      
+      res.on('data', function (body) {
+        expect(body.toString()).to.be.equal("GZIP Content");
+        source.close();
+        proxyServer.close();
+        done();
+      });
+
+    }).end();
+
   });
+
 });
